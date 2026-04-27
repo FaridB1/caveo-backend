@@ -1,157 +1,108 @@
-// require('dotenv').config();
-// const express = require('express');
-// const cors = require('cors');
-// const path = require('path');
-// const { initDB } = require('./config/db');
-
-// const authRoutes = require('./routes/auth');
-// const tourRoutes = require('./routes/tours');
-// const bookingRoutes = require('./routes/bookings');
-
-// const app = express();
-// const PORT = process.env.PORT || 5000;
-
-// // Middleware
-// app.use(cors({
-//   origin: [
-//     process.env.FRONTEND_URL || 'http://localhost:5173',
-//     process.env.ADMIN_URL || 'http://localhost:5174',
-//   ],
-//   credentials: true,
-// }));
-// app.use(express.json({ limit: '10mb' }));
-// app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// // Static files for uploads
-// app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
-
-// // Health check
-// app.get('/api/health', (req, res) => {
-//   res.json({ status: 'OK', message: 'CAVEO TRAVEL API Running', version: '1.0.0' });
-// });
-
-// // Routes
-// app.use('/api/auth', authRoutes);
-// app.use('/api/tours', tourRoutes);
-// app.use('/api/bookings', bookingRoutes);
-
-// // 404
-// app.use((req, res) => {
-//   res.status(404).json({ success: false, message: 'Route not found' });
-// });
-
-// // Error handler
-// app.use((err, req, res, next) => {
-//   console.error(err.stack);
-//   res.status(err.status || 500).json({
-//     success: false,
-//     message: err.message || 'Internal server error',
-//   });
-// });
-
-// // Initialize DB and start server
-// initDB().then(() => {
-//   app.listen(PORT, () => {
-//     console.log(`\n🚀 CAVEO TRAVEL API running on http://localhost:${PORT}`);
-//     console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-//     console.log(`🗄️  Database: ${process.env.USE_DATABASE === 'true' ? 'PostgreSQL' : 'In-Memory'}\n`);
-//   });
-// }).catch(err => {
-//   console.error('Failed to initialize database:', err);
-//   process.exit(1);
-// });
 require('dotenv').config();
+const { validateEnv } = require('./utils/validateEnv');
+validateEnv(); // Validate before anything else
+
 const express = require('express');
-const cors = require('cors');
-const path = require('path');
+const cors    = require('cors');
+const helmet  = require('helmet');
+const path    = require('path');
 const { initDB } = require('./config/db');
 
-const authRoutes = require('./routes/auth');
-const tourRoutes = require('./routes/tours');
+const authRoutes    = require('./routes/auth');
+const tourRoutes    = require('./routes/tours');
 const bookingRoutes = require('./routes/bookings');
+const contactRoutes = require('./routes/contact');
+const { apiRateLimit } = require('./middleware/rateLimit');
 
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 5000;
 
-// ✅ Allowed origins (production + local)
-const allowedOrigins = [
-  'https://caveotravel.com',
-  'http://localhost:5173',
-  'http://localhost:5174',
-];
+// ── Security Headers ────────────────────────────────────────
+app.use(helmet({
+  contentSecurityPolicy: false, // Disable for now to allow Unsplash images
+  crossOriginEmbedderPolicy: false,
+}));
 
-// ✅ CORS CONFIG (FULL FIX)
+// ── CORS ────────────────────────────────────────────────────
 app.use(cors({
-  origin: function (origin, callback) {
-    // Postman və ya server-side requestlər üçün
-    if (!origin) return callback(null, true);
-
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('CORS blocked: ' + origin));
-    }
-  },
+  origin: [
+    process.env.FRONTEND_URL || 'http://localhost:5173',
+    process.env.ADMIN_URL    || 'http://localhost:5174',
+    // Also allow the deployed domain
+    process.env.DOMAIN ? `https://${process.env.DOMAIN}` : null,
+  ].filter(Boolean),
   credentials: true,
 }));
 
-// 🔧 Body parsers
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// 📁 Static files (uploads)
+// Serve uploaded images
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
-// ❤️ Health check
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    message: 'CAVEO TRAVEL API Running',
-    version: '1.0.0',
-  });
-});
+// Serve data directory (for backup download — admin only)
+// NOT exposed publicly
 
-// 🚀 Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/tours', tourRoutes);
-app.use('/api/bookings', bookingRoutes);
-
-// ❌ 404 handler
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    message: 'Route not found',
-  });
-});
-
-// ⚠️ Error handler
-app.use((err, req, res, next) => {
-  console.error('ERROR:', err.message);
-
-  if (err.message.includes('CORS')) {
-    return res.status(403).json({
-      success: false,
-      message: err.message,
-    });
+// ── Health check ────────────────────────────────────────
+app.get('/api/health', async (req, res) => {
+  const { db } = require('./config/db');
+  let dbStatus = 'unknown';
+  
+  try {
+    if (process.env.USE_DATABASE === 'true') {
+      // Test PostgreSQL connection
+      await db.query('users', 'findAll', { limit: 1 });
+      dbStatus = 'connected';
+    } else {
+      dbStatus = 'json-file';
+    }
+  } catch (err) {
+    dbStatus = 'error: ' + err.message;
   }
 
-  res.status(err.status || 500).json({
-    success: false,
-    message: err.message || 'Internal server error',
+  res.json({
+    status: 'OK',
+    app: 'CAVÉO TRAVEL API',
+    version: '3.0.0',
+    storage: process.env.USE_DATABASE === 'true' ? 'PostgreSQL' : 'JSON File',
+    database: dbStatus,
+    uptime: process.uptime(),
+    time: new Date().toISOString(),
+    env: process.env.NODE_ENV || 'development',
   });
 });
 
-// 🗄️ Start server
-initDB()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log(`\n🚀 CAVEO TRAVEL API running on port ${PORT}`);
-      console.log(`🌍 Allowed origins:`, allowedOrigins);
-      console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`🗄️ Database: ${process.env.USE_DATABASE === 'true' ? 'PostgreSQL' : 'In-Memory'}\n`);
-    });
-  })
-  .catch((err) => {
-    console.error('❌ Failed to initialize database:', err);
-    process.exit(1);
+// ── Routes ──────────────────────────────────────────────
+app.use('/api/auth',     authRoutes);
+app.use('/api/tours',    tourRoutes);
+app.use('/api/bookings', bookingRoutes);
+app.use('/api/contact',  contactRoutes);
+
+// ── 404 ────────────────────────────────────────────────
+app.use((req, res) => {
+  res.status(404).json({ success: false, message: 'Marşrut tapılmadı' });
+});
+
+// ── Error handler ───────────────────────────────────────
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || 'Daxili server xətası',
   });
+});
+
+// ── Start ───────────────────────────────────────────────
+initDB().then(() => {
+  app.listen(PORT, () => {
+    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('  🚀  CAVÉO TRAVEL API işə düşdü');
+    console.log(`  📡  http://localhost:${PORT}`);
+    console.log(`  🗄   Saxlama: ${process.env.USE_DATABASE === 'true' ? 'PostgreSQL' : 'JSON Fayl (data/caveo-data.json)'}`);
+    console.log(`  📧  E-poçt: ${process.env.GMAIL_APP_PASSWORD && process.env.GMAIL_APP_PASSWORD !== 'your_16_char_app_password_here' ? '✅ Konfiqurasiya edilib' : '⚠️  Konfiqurasiya edilməyib'}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+  });
+}).catch(err => {
+  console.error('❌ DB başladılmadı:', err);
+  process.exit(1);
+});
